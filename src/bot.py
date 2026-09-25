@@ -151,6 +151,11 @@ class Store:
         self.conn.commit()
         return cursor.rowcount == 1
 
+    def remove_all_watches(self) -> int:
+        cursor = self.conn.execute("DELETE FROM watchlist")
+        self.conn.commit()
+        return cursor.rowcount
+
     def get_snapshot(self, node_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM snapshots WHERE node_id = ?", (node_id,)).fetchone()
 
@@ -233,14 +238,26 @@ async def reject_unless_owner(update: Update, owner_id: int) -> bool:
     return False
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await reject_unless_owner(update, context.application.bot_data["owner_id"]):
         return
     await update.message.reply_text(
-        "HyVPS 库存 Bot 已启动。\n\n"
-        "/nodes 查看节点\n/watch <节点名称> 加入白名单\n/unwatch <节点名称> 移除白名单\n"
-        "/watchlist 查看白名单\n/status 查看运行状态\n/pause 暂停通知\n/resume 恢复通知"
+        "HyVPS 库存 Bot 使用说明\n\n"
+        "/nodes 查看所有节点\n"
+        "/get <节点名称> 查询指定节点当前库存\n"
+        "/watch <节点名称> 加入单个节点白名单\n"
+        "/watch all 监控所有节点\n"
+        "/unwatch <节点名称> 移除单个节点\n"
+        "/unwatch all 移除所有节点\n"
+        "/watchlist 查看白名单\n"
+        "/status 查看运行状态\n"
+        "/pause 暂停通知\n"
+        "/resume 恢复通知"
     )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await help_command(update, context)
 
 
 async def nodes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -258,12 +275,12 @@ async def nodes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(message, parse_mode="HTML")
 
 
-async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def get_node(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await reject_unless_owner(update, context.application.bot_data["owner_id"]):
         return
     node_name = " ".join(context.args).strip()
     if not node_name:
-        await update.message.reply_text("用法：/watch <节点名称>，节点名称可从 /nodes 获取。")
+        await update.message.reply_text("用法：/get <节点名称>，节点名称可从 /nodes 获取。")
         return
     try:
         inventory = await asyncio.to_thread(fetch_inventory, os.getenv("INVENTORY_API_URL", API_URL))
@@ -278,8 +295,37 @@ async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         names = "\n".join(f"- {escape(node.name)} ({escape(node.location_code)})" for node in matches)
         await update.message.reply_text(f"节点名称不唯一，请提供更准确的名称：\n{names}", parse_mode="HTML")
         return
-    node = matches[0]
+    await update.message.reply_text(format_node(matches[0]), parse_mode="HTML")
+
+
+async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await reject_unless_owner(update, context.application.bot_data["owner_id"]):
+        return
+    node_name = " ".join(context.args).strip()
+    if not node_name:
+        await update.message.reply_text("用法：/watch <节点名称>，也可以使用 /watch all 监控全部节点。")
+        return
+    try:
+        inventory = await asyncio.to_thread(fetch_inventory, os.getenv("INVENTORY_API_URL", API_URL))
+    except InventoryError as exc:
+        await update.message.reply_text(f"库存接口请求失败：{escape(str(exc))}")
+        return
     store: Store = context.application.bot_data["store"]
+    if normalize_node_name(node_name) == "all":
+        for node in inventory.values():
+            if store.add_watch(node):
+                store.save_snapshot(node)
+        await update.message.reply_text(f"已将全部 {len(inventory)} 个节点加入白名单，并建立初始基线。")
+        return
+    matches = find_nodes_by_name(inventory, node_name)
+    if not matches:
+        await update.message.reply_text("找不到这个节点，请确认名称与 /nodes 显示的名称一致。")
+        return
+    if len(matches) > 1:
+        names = "\n".join(f"- {escape(node.name)} ({escape(node.location_code)})" for node in matches)
+        await update.message.reply_text(f"节点名称不唯一，请提供更准确的名称：\n{names}", parse_mode="HTML")
+        return
+    node = matches[0]
     added = store.add_watch(node)
     store.save_snapshot(node)
     await update.message.reply_text(
@@ -293,9 +339,13 @@ async def unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     node_name = " ".join(context.args).strip()
     if not node_name:
-        await update.message.reply_text("用法：/unwatch <节点名称>")
+        await update.message.reply_text("用法：/unwatch <节点名称>，也可以使用 /unwatch all 移除全部节点。")
         return
     store: Store = context.application.bot_data["store"]
+    if normalize_node_name(node_name) == "all":
+        removed = store.remove_all_watches()
+        await update.message.reply_text(f"已移除全部节点，共 {removed} 个。")
+        return
     matches = [row for row in store.watchlist() if normalize_node_name(row["node_name"]) == normalize_node_name(node_name)]
     if len(matches) != 1:
         await update.message.reply_text("该节点不在白名单中。" if not matches else "节点名称不唯一，请使用完整节点名称。")
@@ -311,7 +361,8 @@ async def watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not rows:
         await update.message.reply_text("白名单为空，当前不会主动推送库存变化。")
         return
-    await update.message.reply_text("\n".join(escape(row["node_name"]) for row in rows), parse_mode="HTML")
+    for message in split_message([escape(row["node_name"]) for row in rows]):
+        await update.message.reply_text(message, parse_mode="HTML")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -391,7 +442,9 @@ def build_application() -> Application:
     )
     application.bot_data.update(owner_id=owner_id, store=store, poll_interval=poll_interval)
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("nodes", nodes))
+    application.add_handler(CommandHandler("get", get_node))
     application.add_handler(CommandHandler("watch", watch))
     application.add_handler(CommandHandler("unwatch", unwatch))
     application.add_handler(CommandHandler("watchlist", watchlist))

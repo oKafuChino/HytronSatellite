@@ -49,6 +49,8 @@ class BotTests(unittest.TestCase):
             node = flatten_nodes(FIXTURE)["node-1"]
             self.assertTrue(store.add_watch(node))
             self.assertFalse(store.add_watch(node))
+            self.assertEqual(store.remove_all_watches(), 1)
+            self.assertTrue(store.add_watch(node))
             store.save_snapshot(node)
             self.assertEqual(store.get_snapshot(node.id)["state"], "有货")
             self.assertTrue(store.remove_watch(node.id))

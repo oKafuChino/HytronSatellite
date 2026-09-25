@@ -145,6 +145,16 @@ chmod 600 .env
 
 ## 七、启动 Bot
 
+首次使用 bind mount 时，需要让容器用户 `10001` 拥有数据目录的读写权限。请先执行：
+
+```bash
+mkdir -p data
+sudo chown -R 10001:10001 data
+sudo chmod 750 data
+```
+
+如果之前使用 `sudo docker compose` 启动过，`data` 目录或数据库文件可能属于 root；上面的命令可以修复这种情况。
+
 在项目目录执行：
 
 ```bash
@@ -287,6 +297,18 @@ docker compose logs --tail=200
 ```
 
 最常见原因是 `.env` 中的 Token 或用户 ID 未填写，或者用户 ID 不是数字。
+
+如果日志中出现 `sqlite3.OperationalError: unable to open database file`，修复数据目录权限：
+
+```bash
+cd /opt/hytronsatellite
+sudo mkdir -p data
+sudo chown -R 10001:10001 data
+sudo chmod 750 data
+docker compose up -d --build --force-recreate
+```
+
+这里的 `10001` 是镜像中 `botuser` 的用户 ID。不要把数据库目录改成只读。
 
 检查配置文件：
 

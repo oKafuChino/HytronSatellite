@@ -12,6 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -21,6 +22,7 @@ from telegram.constants import ChatType
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 API_URL = "https://hyvps.hytron.io/api/v1/nodes/catalog/grouped"
+MAX_MESSAGE_LENGTH = 3900
 logger = logging.getLogger("hytron_bot")
 
 
@@ -86,8 +88,10 @@ def fetch_inventory(url: str = API_URL, timeout: int = 20) -> dict[str, Node]:
     try:
         with urlopen(request, timeout=timeout) as response:
             payload = json.load(response)
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-        raise InventoryError(str(exc)) from exc
+    except HTTPError as exc:
+        raise InventoryError(f"HTTP {exc.code}: {exc.reason}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        raise InventoryError(f"{type(exc).__name__}: {exc}") from exc
     return flatten_nodes(payload)
 
 
@@ -98,6 +102,7 @@ def utc_now() -> str:
 class Store:
     def __init__(self, path: str) -> None:
         self.path = path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -177,6 +182,23 @@ class Store:
         return str(row["value"]) if row else default
 
 
+def split_message(lines: list[str], limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
+    messages: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in lines:
+        line_length = len(line) + (1 if current else 0)
+        if current and current_length + line_length > limit:
+            messages.append("\n".join(current))
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += len(line) + (1 if len(current) > 1 else 0)
+    if current:
+        messages.append("\n".join(current))
+    return messages
+
+
 def format_node(node: Node) -> str:
     available = node.available
     return (
@@ -217,16 +239,15 @@ async def nodes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await reject_unless_owner(update, context.application.bot_data["owner_id"]):
         return
     try:
-        inventory = await asyncio.to_thread(fetch_inventory)
+        inventory = await asyncio.to_thread(fetch_inventory, os.getenv("INVENTORY_API_URL", API_URL))
     except InventoryError as exc:
         await update.message.reply_text(f"库存接口请求失败：{escape(str(exc))}")
         return
     lines = [f"节点数：{len(inventory)}", "使用 /watch <节点ID> 添加监控："]
     for node in sorted(inventory.values(), key=lambda item: (item.location_code, item.name)):
-        lines.append(f"{node.status} | {node.location_code} | {node.name} | <code>{node.id}</code>")
-    text = "\n".join(lines)
-    for offset in range(0, len(text), 3900):
-        await update.message.reply_text(text[offset : offset + 3900], parse_mode="HTML")
+        lines.append(f"{node.status} | {escape(node.location_code)} | {escape(node.name)} | <code>{node.id}</code>")
+    for message in split_message(lines):
+        await update.message.reply_text(message, parse_mode="HTML")
 
 
 async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -237,7 +258,7 @@ async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     node_id = context.args[0].strip()
     try:
-        inventory = await asyncio.to_thread(fetch_inventory)
+        inventory = await asyncio.to_thread(fetch_inventory, os.getenv("INVENTORY_API_URL", API_URL))
     except InventoryError as exc:
         await update.message.reply_text(f"库存接口请求失败：{escape(str(exc))}")
         return
@@ -303,7 +324,7 @@ async def monitor_loop(application: Application) -> None:
     while True:
         try:
             if store.watchlist() and store.get_value("paused", "0") != "1":
-                inventory = await asyncio.to_thread(fetch_inventory)
+                inventory = await asyncio.to_thread(fetch_inventory, os.getenv("INVENTORY_API_URL", API_URL))
                 for row in store.watchlist():
                     node = inventory.get(row["node_id"])
                     if not node:
@@ -370,6 +391,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

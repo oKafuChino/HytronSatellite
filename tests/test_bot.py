@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.bot import Store, flatten_nodes, find_nodes_by_name, normalize_node_name
+from src.bot import Store, flatten_nodes, find_nodes_by_name, format_resource_changes, normalize_node_name
 
 
 FIXTURE = [
@@ -42,6 +42,20 @@ class BotTests(unittest.TestCase):
         nodes = flatten_nodes(FIXTURE)
         self.assertEqual(normalize_node_name("  test   NODE "), "test node")
         self.assertEqual(find_nodes_by_name(nodes, "  TEST NODE ")[0].id, "node-1")
+
+    def test_resource_change_details(self):
+        nodes = flatten_nodes(FIXTURE)
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(str(Path(directory) / "test.db"))
+            node = nodes["node-1"]
+            store.add_watch(node)
+            store.save_snapshot(node)
+            previous = store.get_snapshot(node.id)
+            changed = type(node)(**{**node.__dict__, "available": {**node.available, "cpu": 7, "ram_mb": 2048}})
+            details = format_resource_changes(previous, changed)
+            self.assertIn("CPU: 4 → 7 (+3)", details)
+            self.assertIn("内存(MB): 1024 → 2048 (+1024)", details)
+            store.close()
 
     def test_store_watch_and_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:

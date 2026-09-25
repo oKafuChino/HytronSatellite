@@ -127,6 +127,9 @@ class Store:
             );
             """
         )
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(snapshots)")}
+        if "payload_json" not in columns:
+            self.conn.execute("ALTER TABLE snapshots ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'")
         self.conn.commit()
 
     def close(self) -> None:
@@ -160,18 +163,15 @@ class Store:
         return self.conn.execute("SELECT * FROM snapshots WHERE node_id = ?", (node_id,)).fetchone()
 
     def save_snapshot(self, node: Node) -> None:
-        payload = json.dumps(
-            {"state": node.status, "available": node.available},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        payload = json.dumps(node_payload(node), ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(payload.encode()).hexdigest()
         self.conn.execute(
-            """INSERT INTO snapshots(node_id, state, payload_hash, checked_at)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO snapshots(node_id, state, payload_hash, payload_json, checked_at)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(node_id) DO UPDATE SET state=excluded.state,
-               payload_hash=excluded.payload_hash, checked_at=excluded.checked_at""",
-            (node.id, node.status, digest, utc_now()),
+               payload_hash=excluded.payload_hash, payload_json=excluded.payload_json,
+               checked_at=excluded.checked_at""",
+            (node.id, node.status, digest, payload, utc_now()),
         )
         self.conn.commit()
 
@@ -185,6 +185,50 @@ class Store:
     def get_value(self, key: str, default: str = "") -> str:
         row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return str(row["value"]) if row else default
+
+
+RESOURCE_LABELS = {
+    "cpu": "CPU",
+    "ram_mb": "内存(MB)",
+    "disk_gb": "磁盘(GB)",
+    "ips": "IP总量",
+    "ipv4": "IPv4",
+    "ipv6": "IPv6",
+    "vm_slots": "VM名额",
+}
+
+
+def node_payload(node: Node) -> dict[str, Any]:
+    return {"state": node.status, "available": node.available}
+
+
+def snapshot_payload(snapshot: sqlite3.Row) -> dict[str, Any]:
+    raw = snapshot["payload_json"] if "payload_json" in snapshot.keys() else "{}"
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def format_resource_changes(previous: sqlite3.Row, current: Node) -> str:
+    old_payload = snapshot_payload(previous)
+    old_available = old_payload.get("available", {})
+    changes: list[str] = []
+    for key, label in RESOURCE_LABELS.items():
+        old_value = old_available.get(key, "未知")
+        new_value = current.available.get(key, "未知")
+        if old_value == new_value:
+            continue
+        delta = ""
+        if isinstance(old_value, (int, float)) and isinstance(new_value, (int, float)):
+            difference = new_value - old_value
+            delta = f" ({difference:+g})"
+        changes.append(f"{label}: {old_value} → {new_value}{delta}")
+    old_state = old_payload.get("state", previous["state"])
+    if old_state != current.status:
+        changes.append(f"状态: {old_state} → {current.status}")
+    return "\n".join(changes) or "资源配置发生变化，但没有可展示的字段差异。"
 
 
 def normalize_node_name(name: str) -> str:
@@ -398,11 +442,17 @@ async def monitor_loop(application: Application) -> None:
                     if not node:
                         continue
                     previous = store.get_snapshot(node.id)
+                    payload = json.dumps(node_payload(node), ensure_ascii=False, sort_keys=True)
+                    digest = hashlib.sha256(payload.encode()).hexdigest()
+                    changed = previous and previous["payload_hash"] != digest
                     store.save_snapshot(node)
-                    if previous and store.get_value("rebaseline", "0") != "1" and previous["state"] != node.status:
+                    if changed and store.get_value("rebaseline", "0") != "1":
                         await application.bot.send_message(
                             chat_id=owner_id,
-                            text=f"库存变化通知\n\n{format_node(node)}\n\n{previous['state']} → {node.status}",
+                            text=(
+                                f"库存配置变化通知\n\n{format_node(node)}\n\n"
+                                f"资源变动：\n{format_resource_changes(previous, node)}"
+                            ),
                             parse_mode="HTML",
                         )
                 store.set_value("last_check", utc_now())

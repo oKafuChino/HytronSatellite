@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.bot import Store, flatten_nodes
+from src.bot import Store, flatten_nodes, find_nodes_by_name, normalize_node_name
 
 
 FIXTURE = [
@@ -37,6 +37,11 @@ class BotTests(unittest.TestCase):
         self.assertEqual(list(nodes), ["node-1"])
         self.assertEqual(nodes["node-1"].status, "有货")
         self.assertEqual(nodes["node-1"].orderable_templates, ("Ubuntu 24.04 LTS",))
+
+    def test_node_name_matching(self):
+        nodes = flatten_nodes(FIXTURE)
+        self.assertEqual(normalize_node_name("  test   NODE "), "test node")
+        self.assertEqual(find_nodes_by_name(nodes, "  TEST NODE ")[0].id, "node-1")
 
     def test_store_watch_and_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:

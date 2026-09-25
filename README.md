@@ -186,22 +186,22 @@ docker compose logs -f --tail=100
 /nodes
 ```
 
-`/nodes` 会返回 HyVPS 节点列表及节点 ID，例如：
+`/nodes` 会返回 HyVPS 节点名称、地区和库存状态，例如：
 
 ```text
-有货 | HKG | 节点名称 | 节点ID
+有货 | HKG | Hytron-HK-BDXHK2-1-Server-1
 ```
 
-复制需要监控的节点 ID，然后发送：
+复制需要监控的完整节点名称，然后发送：
 
 ```text
-/watch 节点ID
+/watch 节点名称
 ```
 
 例如：
 
 ```text
-/watch 42c24456-966e-4d0c-8132-6873a7263954
+/watch Hytron-HK-BDXHK2-1-Server-1
 ```
 
 添加成功后，Bot 会记录当前状态作为初始基线。之后只有该节点从“无货”变为“有货”，或从“有货”变为“无货”时，才会主动通知你。
@@ -214,8 +214,8 @@ docker compose logs -f --tail=100
 |---|---|
 | `/start` | 显示帮助信息 |
 | `/nodes` | 获取最新节点列表和库存状态 |
-| `/watch <节点ID>` | 将节点加入白名单并建立初始基线 |
-| `/unwatch <节点ID>` | 从白名单移除节点 |
+| `/watch <节点名称>` | 将节点加入白名单并建立初始基线 |
+| `/unwatch <节点名称>` | 从白名单移除节点 |
 | `/watchlist` | 查看当前白名单 |
 | `/status` | 查看运行状态、白名单数量和最近检查时间 |
 | `/pause` | 暂停主动库存通知，但保留白名单 |
@@ -335,7 +335,7 @@ docker compose logs -f --tail=100
 
 ### 3. Bot 回复 `/start`，但不推送库存
 
-这是默认行为。Bot 只有在你执行 `/watch <节点ID>` 后，才会监控并推送该节点。
+这是默认行为。Bot 只有在你执行 `/watch <节点名称>` 后，才会监控并推送该节点。
 
 检查白名单：
 

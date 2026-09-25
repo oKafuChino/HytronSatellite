@@ -182,6 +182,15 @@ class Store:
         return str(row["value"]) if row else default
 
 
+def normalize_node_name(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
+def find_nodes_by_name(inventory: dict[str, Node], name: str) -> list[Node]:
+    target = normalize_node_name(name)
+    return [node for node in inventory.values() if normalize_node_name(node.name) == target]
+
+
 def split_message(lines: list[str], limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
     messages: list[str] = []
     current: list[str] = []
@@ -203,7 +212,6 @@ def format_node(node: Node) -> str:
     available = node.available
     return (
         f"<b>{escape(node.name)}</b>\n"
-        f"ID: <code>{node.id}</code>\n"
         f"位置: {escape(node.location)} ({escape(node.location_code)})\n"
         f"状态: <b>{node.status}</b>\n"
         f"余量: CPU {available.get('cpu', '?')} | RAM {available.get('ram_mb', '?')} MB | "
@@ -230,7 +238,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "HyVPS 库存 Bot 已启动。\n\n"
-        "/nodes 查看节点\n/watch <节点ID> 加入白名单\n/unwatch <节点ID> 移除白名单\n"
+        "/nodes 查看节点\n/watch <节点名称> 加入白名单\n/unwatch <节点名称> 移除白名单\n"
         "/watchlist 查看白名单\n/status 查看运行状态\n/pause 暂停通知\n/resume 恢复通知"
     )
 
@@ -243,9 +251,9 @@ async def nodes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except InventoryError as exc:
         await update.message.reply_text(f"库存接口请求失败：{escape(str(exc))}")
         return
-    lines = [f"节点数：{len(inventory)}", "使用 /watch <节点ID> 添加监控："]
+    lines = [f"节点数：{len(inventory)}", "使用 /watch &lt;节点名称&gt; 添加监控："]
     for node in sorted(inventory.values(), key=lambda item: (item.location_code, item.name)):
-        lines.append(f"{node.status} | {escape(node.location_code)} | {escape(node.name)} | <code>{node.id}</code>")
+        lines.append(f"{node.status} | {escape(node.location_code)} | {escape(node.name)}")
     for message in split_message(lines):
         await update.message.reply_text(message, parse_mode="HTML")
 
@@ -253,19 +261,24 @@ async def nodes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await reject_unless_owner(update, context.application.bot_data["owner_id"]):
         return
-    if len(context.args) != 1:
-        await update.message.reply_text("用法：/watch <节点ID>，节点 ID 可从 /nodes 获取。")
+    node_name = " ".join(context.args).strip()
+    if not node_name:
+        await update.message.reply_text("用法：/watch <节点名称>，节点名称可从 /nodes 获取。")
         return
-    node_id = context.args[0].strip()
     try:
         inventory = await asyncio.to_thread(fetch_inventory, os.getenv("INVENTORY_API_URL", API_URL))
     except InventoryError as exc:
         await update.message.reply_text(f"库存接口请求失败：{escape(str(exc))}")
         return
-    node = inventory.get(node_id)
-    if not node:
-        await update.message.reply_text("找不到这个节点，请先使用 /nodes 获取最新节点 ID。")
+    matches = find_nodes_by_name(inventory, node_name)
+    if not matches:
+        await update.message.reply_text("找不到这个节点，请确认名称与 /nodes 显示的名称一致。")
         return
+    if len(matches) > 1:
+        names = "\n".join(f"- {escape(node.name)} ({escape(node.location_code)})" for node in matches)
+        await update.message.reply_text(f"节点名称不唯一，请提供更准确的名称：\n{names}", parse_mode="HTML")
+        return
+    node = matches[0]
     store: Store = context.application.bot_data["store"]
     added = store.add_watch(node)
     store.save_snapshot(node)
@@ -278,12 +291,16 @@ async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await reject_unless_owner(update, context.application.bot_data["owner_id"]):
         return
-    if len(context.args) != 1:
-        await update.message.reply_text("用法：/unwatch <节点ID>")
+    node_name = " ".join(context.args).strip()
+    if not node_name:
+        await update.message.reply_text("用法：/unwatch <节点名称>")
         return
     store: Store = context.application.bot_data["store"]
-    removed = store.remove_watch(context.args[0].strip())
-    await update.message.reply_text("已移除。" if removed else "该节点不在白名单中。")
+    matches = [row for row in store.watchlist() if normalize_node_name(row["node_name"]) == normalize_node_name(node_name)]
+    if len(matches) != 1:
+        await update.message.reply_text("该节点不在白名单中。" if not matches else "节点名称不唯一，请使用完整节点名称。")
+        return
+    await update.message.reply_text("已移除。" if store.remove_watch(matches[0]["node_id"]) else "该节点不在白名单中。")
 
 
 async def watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -294,7 +311,7 @@ async def watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not rows:
         await update.message.reply_text("白名单为空，当前不会主动推送库存变化。")
         return
-    await update.message.reply_text("\n".join(f"{row['node_name']}\n<code>{row['node_id']}</code>" for row in rows), parse_mode="HTML")
+    await update.message.reply_text("\n".join(escape(row["node_name"]) for row in rows), parse_mode="HTML")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -348,7 +365,7 @@ async def monitor_loop(application: Application) -> None:
 
 
 async def post_init(application: Application) -> None:
-    application.bot_data["monitor_task"] = application.create_task(monitor_loop(application))
+    application.bot_data["monitor_task"] = asyncio.create_task(monitor_loop(application))
 
 
 async def post_shutdown(application: Application) -> None:
